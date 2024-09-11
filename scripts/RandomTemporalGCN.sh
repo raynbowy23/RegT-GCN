@@ -1,0 +1,4 @@
+python3 run.py --num_timesteps_in 6 --num_timesteps_out 1 --tr 0.2 --model 'RandomTemporalGCN' --tf occrate --dataset_num 3 --epochs 50 # --pretrained --pretrained_model_epoch 30 --pretrained_model "model_in6_out3_epoch30.pt" --epochs 20
+python3 run.py --num_timesteps_in 6 --num_timesteps_out 3 --tr 0.2 --model 'RandomTemporalGCN' --tf occrate --dataset_num 3 --epochs 50 # --pretrained --pretrained_model_epoch 30 --pretrained_model "model_in6_out3_epoch30.pt" --epochs 20
+python3 run.py --num_timesteps_in 6 --num_timesteps_out 12 --tr 0.2 --model 'RandomTemporalGCN' --tf occrate --dataset_num 3 --epochs 50 # --pretrained --pretrained_model_epoch 30 --pretrained_model "model_in6_out12_epoch30.pt" --epochs 20
+python3 run.py --num_timesteps_in 6 --num_timesteps_out 36 --tr 0.2 --model 'RandomTemporalGCN' --tf occrate --dataset_num 3 --epochs 50 # --pretrained --pretrained_model_epoch 30 --pretrained_model "model_in6_out36_epoch30.pt" --epochs 20
