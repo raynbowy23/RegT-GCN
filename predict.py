@@ -26,9 +26,11 @@ parser.add_argument("--momentum", default=0.9, type=float, help="Momentum")
 parser.add_argument("--bs", "--batch_size", default=32, type=int, help="Batch size")
 parser.add_argument("--tr", "--train_ratio", default=0.8, type=float, help="Train ratio")
 parser.add_argument("--tf", "--train_feature", default="available", type=str, help="Train feature (occrate / avaialble)")
-parser.add_argument("--dataset_path", default="../data_analysis/dataset", type=str, help="Dataset path")
+parser.add_argument("--edge_cut", default=None, type=str, help="The type of edge cut (random/neural/None)")
+parser.add_argument("--dataset_path", default="./dataset", type=str, help="Dataset path")
 parser.add_argument("--checkpoint_path", default="../checkpoints/", type=str, help="Checkpoints path")
-parser.add_argument("--dataset_num", default=2, type=int, help="Dataset number (Truckparking dataset '1' / '2')")
+parser.add_argument("--dataloading_type", default=2, type=int, help="Dataset number (Truckparking dataset '1' / '2')")
+parser.add_argument("--decomp_type", default=None, type=str, help="Regional or Random decomposition type")
 parser.add_argument("--num_timesteps_in", default=8, type=int, help="Number of timesteps for input, and large number causes a memory allocation issue")
 parser.add_argument("--num_timesteps_out", default=4, type=int, help="Number of timesteps for output, which is normally half of input")
 parser.add_argument("--model", default="TemporalGCN", type=str, help="Model name you want to use (TemporalGNN - TGCN SOTA, TemporalGConvLSTM - GConvLSTM, RecurrentGCN - might be stack of simple LSTMs)")
@@ -71,33 +73,21 @@ os.makedirs(CHECKPOINT_PATH, exist_ok=True)
 
 # Datasets
 print("Load Data...")
-if args.dataset_num == 1: # Traditional
+
+if args.dataloading_type in [1, 3]:
     # Use parking dataset 1 with StaticGraphTemporalSignal, data stored at './data.pt'
-    dataset = TruckParkingDataset1(root=DATASET_PATH, pre_transform=pre_transform, train_feature=TRAIN_FEATURE, visualize=args.visualize)
-    dataset, edge_index, edge_attr, target_sc, max_list, min_list = dataset.get(num_timesteps_in=args.num_timesteps_in, num_timesteps_out=args.num_timesteps_out)
-elif args.dataset_num == 2: # Regional
+    dataset = TruckParkingDataset1(root=DATASET_PATH, pre_transform=pre_transform, train_feature=TRAIN_FEATURE, edge_cut=args.edge_cut, preprocessed=True)
+    if args.dataloading_type == 1:
+        dataset, edge_index, edge_attr, target_sc, max_list, min_list = dataset.get(num_timesteps_in=args.num_timesteps_in, num_timesteps_out=args.num_timesteps_out)
+    elif args.dataloading_type == 3:
+        dataset, edge_index, edge_attr, target_sc, max_list, min_list = dataset.custom_get(num_timesteps_in=args.num_timesteps_in, num_timesteps_out=args.num_timesteps_out)
+elif args.dataloading_type == 2:
     '''
     For a regional dataset, the number of each state sites are below
     IA: 45, KS: 18, KY: 13, OH: 18, WI: 11
     '''
-    # Use parking dataset 2 with StaticGraphTemporalSignal, data stored at './data.pt'
-    dataset = TruckParkingDataset2(root=DATASET_PATH, pre_transform=pre_transform, train_feature=TRAIN_FEATURE, visualize=args.visualize)
-    dataset, edge_IA_index, edge_KS_index, edge_KY_index, edge_OH_index, edge_WI_index, \
-        edge_IA_attr, edge_KS_attr, edge_KY_attr, edge_OH_attr, edge_WI_attr, target_sc, max_list, min_list = dataset.get(num_timesteps_in=args.num_timesteps_in, num_timesteps_out=args.num_timesteps_out)
-    edge_IA_index = edge_IA_index.to(device)
-    edge_KS_index = edge_KS_index.to(device)
-    edge_KY_index = edge_KY_index.to(device)
-    edge_OH_index = edge_OH_index.to(device)
-    edge_WI_index = edge_WI_index.to(device)
-    edge_IA_attr = edge_IA_attr.to(device)
-    edge_KS_attr = edge_KS_attr.to(device)
-    edge_KY_attr = edge_KY_attr.to(device)
-    edge_OH_attr = edge_OH_attr.to(device)
-    edge_WI_attr = edge_WI_attr.to(device)
-
-elif args.dataset_num == 3: # Random
-    # Use parking dataset 3 with StaticGraphTemporalSignal, data stored at './data.pt'
-    dataset = TruckParkingDataset3(root=DATASET_PATH, pre_transform=pre_transform, train_feature=TRAIN_FEATURE, visualize=args.visualize)
+    # Use parking dataset 2 with StaticGraphTemporalSignal, data stored at './data.pt'. Usually used for RegT-GCN
+    dataset = TruckParkingDataset2(root=DATASET_PATH, pre_transform=pre_transform, train_feature=TRAIN_FEATURE, preprocessed=True, decomp_type=args.decomp_type)
     dataset, edge_IA_index, edge_KS_index, edge_KY_index, edge_OH_index, edge_WI_index, \
         edge_IA_attr, edge_KS_attr, edge_KY_attr, edge_OH_attr, edge_WI_attr, target_sc, max_list, min_list = dataset.get(num_timesteps_in=args.num_timesteps_in, num_timesteps_out=args.num_timesteps_out)
     edge_IA_index = edge_IA_index.to(device)
@@ -126,11 +116,9 @@ elif args.model == 'SpatialGCN':
 elif args.model == 'RandomTemporalGCN':
     model = RegionalTemporalGCN(node_features=8, num_nodes=num_nodes, periods=args.num_timesteps_in, output_dim=args.num_timesteps_out).to(device) # requires temporal dataset
 elif args.model == 'TemporalGCN':
-    model = TemporalGNN(node_features=8, periods=args.num_timesteps_in, output_dim=args.num_timesteps_out).to(device) # requires temporal dataset
+    model = TemporalGCN(node_features=8, periods=args.num_timesteps_in, output_dim=args.num_timesteps_out).to(device) # requires temporal dataset
 elif args.model == 'TemporalGConvLSTM':
     model = TemporalGConvLSTM(node_features=8, periods=args.num_timesteps_in, output_dim=args.num_timesteps_out).to(device)
-elif args.model == 'TemporalRecurrentGCN':
-    model = RecurrentGCN(node_features=8, filters=args.num_timesteps_in, output_dim=args.num_timesteps_out).to(device)
 elif args.model == 'StackedGRU':
     model = StackedGRU(in_channels=args.num_timesteps_in, node_features=8, periods=args.num_timesteps_in, output_dim=args.num_timesteps_out).to(device)
 elif args.model == 'ConvStackedTemporalGCN':
@@ -139,6 +127,12 @@ elif args.model == 'GraphSAGETemporalGCN':
     model = GraphSAGETemporalGCN(node_features=8, num_nodes=num_nodes, periods=args.num_timesteps_in, output_dim=args.num_timesteps_out).to(device) 
 elif args.model == 'GAT':
     model = GATTemporal(node_features=8, num_nodes=num_nodes, periods=args.num_timesteps_in, output_dim=args.num_timesteps_out).to(device) 
+elif args.model == 'STAEformer':
+    model = STAEformer(num_nodes=num_nodes, in_steps=args.num_timesteps_in, out_steps=args.num_timesteps_out, tod_embedding_dim=0).to(device)
+elif args.model == 'STID':
+    model = STID(num_nodes=num_nodes, input_len=args.num_timesteps_in, output_len=args.num_timesteps_out, if_day_in_week=False, if_time_in_day=False).to(device)
+elif args.model == 'STNorm':
+    model = STNorm(num_nodes=num_nodes, in_dim=8, out_dim=args.num_timesteps_out).to(device)
 
 
 model.load_state_dict(torch.load(osp.join('pretrained', TRAIN_FEATURE, args.model, 'model_in{}_out{}_epoch{}.pt'.format(args.num_timesteps_in, args.num_timesteps_out, int(args.pretrained_idx)))))
@@ -171,6 +165,15 @@ def predict():
                                     edge_IA_attr, edge_KS_attr, edge_KY_attr, edge_OH_attr, edge_WI_attr)
             # out = out*cap_max
             # batch.y = batch.y*cap_max
+            mae.append(np.abs((batch.y - out).cpu()))
+            mse.append(((batch.y - out) ** 2).cpu())
+            # Remove inf
+            if np.isinf((np.abs((batch.y - out).cpu() / np.percentile(batch.y.cpu(), q=95)))).any() == 0:
+                mape.append((np.abs((batch.y - out).cpu() / np.percentile(batch.y.cpu(), q=95))))
+        elif args.model == 'STAEformer' or args.model == 'STID' or args.model == 'STNorm':
+            # print(x.shape) # (batch, seq_len, num_nodes, num_features)
+            batch.x = batch.x.permute(2, 0, 1).unsqueeze(0)
+            out = model(batch.x)
             mae.append(np.abs((batch.y - out).cpu()))
             mse.append(((batch.y - out) ** 2).cpu())
             # Remove inf
@@ -244,6 +247,6 @@ def visualize(out_list, gt_list):
 if __name__ == '__main__':
     mae, rmse, mape, out_list, gt_list = predict()
 
-    visualize(out_list, gt_list)
+    # visualize(out_list, gt_list)
 
     print(f"Test Results: RMSE: {rmse}, MAE: {mae}, MAPE: {mape}")

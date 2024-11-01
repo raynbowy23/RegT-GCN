@@ -1,0 +1,1 @@
+python predict.py --num_timesteps_in 6 --num_timesteps_out 1 --tr 0.2 --model 'STAEformer' --tf occrate --dataloading_type 3 --pretrained_idx 50

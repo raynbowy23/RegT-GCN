@@ -1,4 +1,1 @@
-python3.10 predict.py --num_timesteps_in 6 --num_timesteps_out 1 --tr 0.2 --model 'RandomTemporalGCN' --dataset_num 3 --tf occrate --pretrained_idx 50 
-python3.10 predict.py --num_timesteps_in 6 --num_timesteps_out 3 --tr 0.2 --model 'RandomTemporalGCN' --dataset_num 3 --tf occrate --pretrained_idx 50
-python3.10 predict.py --num_timesteps_in 6 --num_timesteps_out 12 --tr 0.2 --model 'RandomTemporalGCN' --dataset_num 3 --tf occrate --pretrained_idx 50
-python3.10 predict.py --num_timesteps_in 6 --num_timesteps_out 36 --tr 0.2 --model 'RandomTemporalGCN' --dataset_num 3 --tf occrate --pretrained_idx 50
+python predict.py --num_timesteps_in 6 --num_timesteps_out 1 --tr 0.2 --model 'RandomTemporalGCN' --dataloading_type 2 --tf occrate --pretrained_idx 50 --decomp_type 'random'

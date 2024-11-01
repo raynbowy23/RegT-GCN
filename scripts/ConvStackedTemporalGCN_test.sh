@@ -1,1 +1,1 @@
-python3 predict.py --dataset_num 2 --num_timesteps_in 6 --num_timesteps_out 3 --tr 0.2 --model 'ConvStackedTemporalGCN' --tf occrate
+python predict.py --dataloading_type 2 --num_timesteps_in 6 --num_timesteps_out 3 --tr 0.2 --model 'ConvStackedTemporalGCN' --tf occrate --decomp_type 'random'

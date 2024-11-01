@@ -1,14 +1,16 @@
 import os.path as osp
 from typing import Callable, List, Optional
+import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
 from sklearn.preprocessing import MinMaxScaler
+from tqdm import tqdm
 
 import torch
 from torch_geometric.data import Data, Dataset
 from torch_geometric_temporal.signal.static_graph_temporal_signal import StaticGraphTemporalSignal
 
-from encoders import IdentityEncoder
+from utils import unique, IdentityEncoder, preprocess
 
 
 def load_node_csv(path, idx_col, names, encoders=None, **kwargs):
@@ -26,13 +28,23 @@ def load_node_csv(path, idx_col, names, encoders=None, **kwargs):
     return x, mapping
 
 
-def load_edge_csv(path, src_index_col, src_mapping=None, dst_index_col=None, dst_mapping=None, names=None, encoders=None, edge_cut=None, **kwargs):
+def load_edge_csv(path, mapping=None, src_index_col=None, dst_index_col=None, names=None, encoders=None, edge_cut='neural', **kwargs):
     df = pd.read_csv(path, names=names, **kwargs)
 
-    src = [src_mapping[index] for index in df[src_index_col]]
-    dst = [dst_mapping[index] for index in df[dst_index_col]]
-    edge_index = torch.tensor([src, dst])
-    batch = torch.tensor([0, 0, 1, 1])
+    src = []
+    dst = []
+    for index in df[src_index_col]:
+        try:
+            src.append(mapping[index])
+        except KeyError:
+            mapping[index] = len(mapping)
+            src.append(mapping[index])
+    for index in df[dst_index_col]:
+        try:
+            dst.append(mapping[index])
+        except:
+            mapping[index] = len(mapping)
+            dst.append(mapping[index])
 
     edge_attr = None
     if encoders is not None:
@@ -42,7 +54,7 @@ def load_edge_csv(path, src_index_col, src_mapping=None, dst_index_col=None, dst
     if edge_cut == 'random':
         edge_index, edge_mask = random_edge_sampler(edge_index, 0.8)
     elif edge_cut == 'neural':
-        pass
+        edge_index = torch.tensor([src, dst], dtype=torch.long)
     
     return edge_index, edge_attr
 
@@ -69,36 +81,44 @@ def random_edge_sampler(edge_index, percent, normalization=None):
     return edge_index, edge_mask
 
 
-class TruckParkingDataset1(Dataset):
 
-    def __init__(self,
-                 root: str,
-                 edge_window_size: int=10,
+class TruckParkingDataset1(Dataset):
+    '''Normal Dataset'''
+    def __init__(self, root: str, 
                  transform: Optional[Callable]=None,
                  pre_transform: Optional[Callable]=None,
                  pre_filter: Optional[Callable]=None,
-                 is_train: bool=True,
                  train_feature: str='occrate',
-                 edge_cut: str=None,
-                 visualize: bool=False):
-        self.edge_window_size = edge_window_size
-        self.root = root
-        self.is_train = is_train
+                 preprocessed: bool=False,
+                 data_size: str='small',
+                 edge_cut: str=None):
         self.train_feature = train_feature
+        self.root = root
+        self.dataset_root = osp.join(self.root, 'data')
         self.processed_root = osp.join(self.root, 'processed', self.train_feature, 'ordinal', '0322')
-        self.edge_cut = edge_cut
-        self.visualize_adj = visualize
 
         self.sc = MinMaxScaler(feature_range=(0,1))
         self.max_list = []
         self.min_list = []
+        self.data_size = data_size
+        self.preprocessed = preprocessed
+        self.edge_cut = edge_cut
+
+        if data_size == "small":
+            self.time_range = 14
+        elif data_size == "medium":
+            self.time_range = 92
+        elif data_size == "large":
+            self.time_range = 365
 
         super().__init__(root, transform, pre_transform, pre_filter)
 
+
     @property
     def processed_file_names(self):
-        return osp.join(self.processed_root, 'data.pt')
+        return osp.join(self.processed_root, 'tpims_data_{}.pkl'.format(self.data_size))
 
+    @property
     def num_nodes(self): 
         return self.data.edge_index.max().item() + 1
 
@@ -106,98 +126,111 @@ class TruckParkingDataset1(Dataset):
         data, mapping = load_node_csv(path, index_col, names=['SITE_IDX', 'SITE_ID', 'TIMESTAMP', 'WEEKID', 'DAYID', 'HOURID', 'TRAVEL_TIME', 'TRAVEL_MILE', 'OWNER', 'AMENITY', 'CAPACITY', 'AVAILABLE', 'OCCRATE'], encoders=encoders)
         return data, mapping
 
-    def load_edge_data(self, path, src_index_col, src_mapping, dst_index_col, dst_mapping, encoders=None):
-        edge_idx, edge_attr = load_edge_csv(path, src_index_col, src_mapping, dst_index_col, dst_mapping, names=['SRC_IDX', 'SRC', 'DST_IDX', 'DST', 'DIST'], encoders=encoders, edge_cut=self.edge_cut, visualize_adj=self.visualize_adj)
+    def load_edge_data(self, path, mapping, src_index_col, dst_index_col, encoders=None):
+        edge_idx, edge_attr = load_edge_csv(path, mapping, src_index_col, dst_index_col, names=['SRC_IDX', 'SRC', 'DST_IDX', 'DST', 'DIST'], encoders=encoders)
         return edge_idx, edge_attr
 
-    @property
-    def raw_file_names(self):
-        t_prev = datetime.strptime('2022-03-01T00:00:00Z', '%Y-%m-%dT%H:%M:%SZ')
-        # t_prev = datetime.strptime('2022-03-15T00:00:00Z', '%Y-%m-%dT%H:%M:%SZ')
-        file_list = []
-        _minutes = 10 # time interval every 10 minues
-        assert _minutes != 0
-        min_per_hour = int(60 / _minutes)
-
-        for i in range(min_per_hour*24*14):
-            t = (t_prev + timedelta(minutes=_minutes)).strftime('%Y-%m-%dT%H:%M:%SZ')
-            t_prev = t_prev.strftime('%Y-%m-%dT%H:%M:%SZ')
-
-            t_file = t_prev.replace(':', '-') # change notation for file name
-            file_name = 'node_data_' + t_file + '.csv'
-
-            # Update time
-            t_prev = datetime.strptime(t, '%Y-%m-%dT%H:%M:%SZ')
-
-            file_list.append(file_name)
-        
-        return file_list
-
     def process(self):
-    
-        node_root = osp.join(self.root, 'nodes/0322')
-        link_path = osp.join(self.root, 'links/0322/link_data.csv')
-        # processed_root = osp.join(self.root, 'processed', self.train_feature)
-        data_store_list = []
-        edge_index_list, edge_attr_list, node_data_list, target_list = [], [], [], []
+        if self.preprocessed:
+            return
+        else:
+            capacity_stats, amenity_stats, owner_list, mile_marker_list = preprocess(self.dataset_root)
+            link_root = osp.join(self.root, 'links', '0322')
+            data_dir = osp.join(self.root, 'data')
 
-        idx = 0
-        for i, node_path in enumerate(self.raw_file_names):
-            node_path = osp.join(node_root, node_path)
-            if osp.exists(node_path):
-                # Read data from 'raw_path'.
-                with open(node_path, 'r') as f:
-                    data = f.read().split('\n')[:-2]
-                    data = [[x for x in line.split(',')] for line in data]
+            link_path = osp.join(link_root, 'link_data.csv')
 
-                    stamps = [datetime.strptime(line[2], '%Y-%m-%dT%H:%M:%SZ') for line in data]
+            node_data_list = []
+            sc = MinMaxScaler(feature_range=(0,1))
 
-                    node_data, mapping = self.load_node_data(node_path, index_col='STATE_IDX', encoders={
-                        'WEEKID': IdentityEncoder(dtype=torch.long), 'DAYID': IdentityEncoder(dtype=torch.long), 'HOURID': IdentityEncoder(dtype=torch.long),
-                        'TRAVEL_TIME': IdentityEncoder(dtype=torch.float), 'OWNER': IdentityEncoder(dtype=torch.long),
-                        'AMENITY': IdentityEncoder(dtype=torch.long), 'CAPACITY': IdentityEncoder(dtype=torch.long), self.train_feature.upper(): IdentityEncoder(dtype=torch.float)})
+            # Make mapping for edge data
+            dfLOC = pd.read_csv(osp.join(data_dir, 'tpims_location.csv'))
+            # Replacement
+            # NaN -> 0
+            dfLOC = dfLOC[~dfLOC['SITE_ID'].str.startswith(('IL', 'MI', 'MN', 'IN'), na=False)]
+            dfLOC = dfLOC.replace({np.nan: 0})
 
-                edge_index, edge_attr = self.load_edge_data(link_path, src_index_col='SRC_IDX', src_mapping=mapping, dst_index_col='DST_IDX',
-                                                            dst_mapping=mapping, encoders={'DIST': IdentityEncoder(dtype=torch.float)})
-                # num_nodes = edge_index.max().item() + 1
+            dfNODE = pd.read_csv(osp.join(data_dir, 'tpims_data_{}.csv'.format(self.data_size)))
+            mapping = {index-1: i for i, index in enumerate(range(1, len(dfLOC)))} # site_idx to idx
 
-                # edge_attr = [float(line[2]) for line in data] # distance between siteId
-                # edge_attr = torch.tensor(edge_attr.squeeze(), dtype=torch.long) # edge_weight
-                edge_attr = edge_attr.squeeze().clone().detach()
-
-            node_data = torch.from_numpy(self.sc.fit_transform(node_data))
-
-            max_data = [node_data[i][-1].max() for i in range(node_data.size(0))]
-            min_data = [node_data[i][-1].min() for i in range(node_data.size(0))]
-            self.max_list.append(max_data)
-            self.min_list.append(min_data)
-
-
-            offset = timedelta(days=3.1)
-            graph_idx, factor = [], 1
-            # for each 10 minute
-            for t in stamps:
-                factor = factor if t < stamps[0] + factor * offset else factor + 1
-                graph_idx.append(factor - 1)
-            graph_idx = torch.tensor(graph_idx, dtype=torch.long)
-
-            data_list = []
-            for i in range(graph_idx.max().item() + 1):
-                data = Data(x=node_data[:,:-1].type(torch.FloatTensor), edge_index=edge_index.type(torch.LongTensor), edge_attr=edge_attr.type(torch.FloatTensor), 
-                            requires_grad_=True)
-                data.num_node_features = 8 # capacity
-                data.num_nodes = len(mapping)
-                data.y = node_data[:,-1].type(torch.FloatTensor) # target == availability (occRate)
-                data_list.append(data)
-
-            if self.pre_filter is not None:
-                data = self.pre_filter(data)
+            # One edge data for all states
+            edge_index, edge_attr = self.load_edge_data(link_path, mapping=mapping, src_index_col='SRC_IDX', dst_index_col='DST_IDX',
+                                                        encoders={'DIST': IdentityEncoder(dtype=torch.float)})
+            edge_attr = edge_attr.squeeze().clone().detach()
             
-            if self.pre_transform is not None:
-                data = self.pre_transform(data)
-            node_data_list.append(node_data)
+            t_prev = datetime.strptime('2022-03-01 00:00:00', '%Y-%m-%d %H:%M:%S')
+            
+            site_id, site_idx = unique(dfLOC['SITE_ID'])
+            # available = [0 for i in range(len(dfLOC))]
+            site_id_dict = {site: idx for idx, site in enumerate(site_id)}
+            available_dict = {site: 0 for site in site_id}
+            available = [0 for i in range(len(dfLOC))]
 
-        torch.save((edge_index, edge_attr, node_data_list), osp.join(self.processed_root, 'data.pt'))
+
+            for i in tqdm(range(6*24*self.time_range)):
+                idx = 0
+
+                t = (t_prev + timedelta(minutes=10)).strftime('%Y-%m-%d %H:%M:%S')
+                t_prev = t_prev.strftime('%Y-%m-%d %H:%M:%S')
+                mask = dfNODE['time_stamp'].between(str(t_prev), str(t))
+                filtered_df = dfNODE[mask]
+                siteId = filtered_df['site_id'].values
+                tmp_available = filtered_df['available'].values
+
+                week = int(int(t.split(' ')[0].split('-')[2]) / 7)
+                day = datetime.strptime(t, '%Y-%m-%d %H:%M:%S').weekday() # Mon - Sun
+                hour = t.split(' ')[1].split(':')[0]
+                adj_hour = int(hour)
+
+                ### Creating/preparing csv files first
+                site_to_available = dict(zip(siteId, tmp_available))
+
+                # Initialize dataframe
+                adj_hour = 0
+                temp_s_idx = len(site_id)
+                _node_data_list = []
+                ## IMPORTANT: All node data must be in the location data.
+                for j, site in enumerate(site_id):
+                    # Filling up the unknown values
+                    if 'IN' not in site[:2] and 'MI' not in site[:2] and 'MN' not in site[:3] and 'IL' not in site[:2]:
+                        idx += 1
+                        if site in siteId:
+                            s_idx = site_id_dict[site]
+                            available_value = site_to_available[site]
+
+                            if capacity_stats[j] == 0:
+                                capacity_stats[j] = np.finfo(np.float32).eps
+                            else:
+                                node_dict = {'SITE_IDX': [s_idx], 'SITE_ID': [site], 'TIMESTAMP': [t], 'WEEKID': [int(week)], 'DAYID': [int(day)], 'HOURID': [int(hour)], 'MILE_MARKER': [mile_marker_list[j]], 'OWNER': [owner_list[j]], 'AMENITY': [amenity_stats[j]], 'CAPACITY': [capacity_stats[j]], 'AVAILABLE': [available_value], 'OCCRATE': [available_value/capacity_stats[j]]}
+                            available[s_idx] = available_value
+                        else:
+                            try:
+                                # Change available/occrate when the site is not found
+                                node_dict = {'SITE_IDX': [temp_s_idx], 'SITE_ID': [site], 'TIMESTAMP': [t], 'WEEKID': [int(week)], 'DAYID': [int(day)], 'HOURID': [adj_hour], 'MILE_MARKER': [mile_marker_list[j]], 'OWNER': [owner_list[j]], 'AMENITY': [amenity_stats[j]], 'CAPACITY': [capacity_stats[j]], 'AVAILABLE': [int(available[temp_s_idx])], 'OCCRATE': [available[temp_s_idx]/capacity_stats[j]]}
+                            except IndexError:
+                                node_dict = {'SITE_IDX': [temp_s_idx], 'SITE_ID': [site], 'TIMESTAMP': [t], 'WEEKID': [int(week)], 'DAYID': [int(day)], 'HOURID': [adj_hour], 'MILE_MARKER': [mile_marker_list[j]], 'OWNER': [owner_list[j]], 'AMENITY': [amenity_stats[j]], 'CAPACITY': [capacity_stats[j]], 'AVAILABLE': [0], 'OCCRATE': [0.0]}
+                            temp_s_idx += 1
+                                
+                        encoders = {'WEEKID': IdentityEncoder(dtype=torch.long), 'DAYID': IdentityEncoder(dtype=torch.long), 'HOURID': IdentityEncoder(dtype=torch.long),
+                                'MILE_MARKER': IdentityEncoder(dtype=torch.float), 'OWNER': IdentityEncoder(dtype=torch.long),
+                                'AMENITY': IdentityEncoder(dtype=torch.long), 'CAPACITY': IdentityEncoder(dtype=torch.long), self.train_feature.upper(): IdentityEncoder(dtype=torch.float)}
+
+                        if encoders is not None:
+                            xs = [encoder(node_dict[col]) for col, encoder in encoders.items()]
+                            x = torch.cat(xs, dim=-1)
+                            x = torch.nan_to_num(x)
+
+                        _node_data_list.append(x)
+
+                # Upload to csv file
+                node_data = torch.cat(_node_data_list, dim=0)
+                node_data = torch.from_numpy(sc.fit_transform(node_data))
+                node_data_list.append(node_data)
+
+                # Update time
+                t_prev = datetime.strptime(t, '%Y-%m-%d %H:%M:%S')
+
+            torch.save((edge_index, edge_attr, node_data_list), osp.join(self.processed_root, 'tpims_data_{}.pkl'.format(self.data_size)))
 
     def len(self):
         return len(self.processed_file_names)
@@ -207,7 +240,7 @@ class TruckParkingDataset1(Dataset):
         features = []
         target = []
 
-        edge_index, edge_attr, node_data = torch.load(osp.join(self.processed_root, 'data.pt'))
+        edge_index, edge_attr, node_data = torch.load(osp.join(self.processed_root, 'tpims_data_{}.pkl'.format(self.data_size)))
         node_data = torch.stack(node_data, dim=1).permute(0,2,1)
         node_data = torch.as_tensor(node_data)
         print(node_data.shape)
@@ -227,27 +260,39 @@ class TruckParkingDataset1(Dataset):
 
 class TruckParkingDataset2(Dataset):
     '''Regional/Normal Dataset'''
-
     def __init__(self, root: str, 
                  transform: Optional[Callable]=None,
                  pre_transform: Optional[Callable]=None,
                  pre_filter: Optional[Callable]=None,
                  train_feature: str='occrate',
-                 visualize: bool=False):
+                 preprocessed: bool=False,
+                 data_size: str='small',
+                 decomp_type: str='regional'):
         self.train_feature = train_feature
         self.root = root
-        self.processed_root = osp.join(self.root, 'processed', self.train_feature, 'regional', '0721')
-        self.visualize_adj = visualize
+        self.dataset_root = osp.join(self.root, 'data')
+        self.processed_root = osp.join(self.root, 'processed', self.train_feature, decomp_type, '0322')
 
         self.sc = MinMaxScaler(feature_range=(0,1))
         self.max_list = []
         self.min_list = []
+        self.data_size = data_size
+        self.preprocessed = preprocessed
+        self.decomp_type = decomp_type
+
+        if data_size == "small":
+            self.time_range = 14
+        elif data_size == "medium":
+            self.time_range = 92
+        elif data_size == "large":
+            self.time_range = 365
+
         super().__init__(root, transform, pre_transform, pre_filter)
 
 
     @property
     def processed_file_names(self):
-        return osp.join(self.processed_root, 'data.pt')
+        return osp.join(self.processed_root, 'tpims_data_{}.pkl'.format(self.data_size))
 
     @property
     def num_nodes(self): 
@@ -257,127 +302,139 @@ class TruckParkingDataset2(Dataset):
         data, mapping = load_node_csv(path, index_col, names=['SITE_IDX', 'SITE_ID', 'TIMESTAMP', 'WEEKID', 'DAYID', 'HOURID', 'TRAVEL_TIME', 'TRAVEL_MILE', 'OWNER', 'AMENITY', 'CAPACITY', 'AVAILABLE', 'OCCRATE'], encoders=encoders)
         return data, mapping
 
-    def load_edge_data(self, path, src_index_col, src_mapping, dst_index_col, dst_mapping, encoders=None):
-        edge_idx, edge_attr = load_edge_csv(path, src_index_col, src_mapping, dst_index_col, dst_mapping, names=['SRC_IDX', 'SRC', 'DST_IDX', 'DST', 'DIST'], encoders=encoders, visualize_adj=self.visualize_adj)
+    def load_edge_data(self, path, mapping, src_index_col, dst_index_col, encoders=None):
+        edge_idx, edge_attr = load_edge_csv(path, mapping, src_index_col, dst_index_col, names=['SRC_IDX', 'SRC', 'DST_IDX', 'DST', 'DIST'], encoders=encoders)
         return edge_idx, edge_attr
 
-    @property
-    def raw_file_names(self):
-        t_prev = datetime.strptime('2021-07-01T00:00:00Z', '%Y-%m-%dT%H:%M:%SZ')
-        # t_prev = datetime.strptime('2022-09-01T00:00:00Z', '%Y-%m-%dT%H:%M:%SZ')
-        file_list = []
-        _minutes = 10 # time interval every 10 minues
-        assert _minutes != 0
-        min_per_hour = int(60 / _minutes)
-
-        for i in range(min_per_hour*24*14):
-            t = (t_prev + timedelta(minutes=_minutes)).strftime('%Y-%m-%dT%H:%M:%SZ')
-            t_prev = t_prev.strftime('%Y-%m-%dT%H:%M:%SZ')
-
-            t_file = t_prev.replace(':', '-') # change notation for file name
-            file_name = 'node_data_' + t_file + '.csv'
-
-            # Update time
-            t_prev = datetime.strptime(t, '%Y-%m-%dT%H:%M:%SZ')
-
-            file_list.append(file_name)
-        
-        return file_list
-
     def process(self):
-    
-        node_root = osp.join(self.root, 'nodes/0322')
-        # node_root = osp.join(self.root, 'nodes/0622')
-        link_path = osp.join(self.root, 'links/0322/link_data.csv')
-        link_IA = osp.join(self.root, 'links/0322/link_IA_data.csv')
-        link_KS = osp.join(self.root, 'links/0322/link_KS_data.csv')
-        link_KY = osp.join(self.root, 'links/0322/link_KY_data.csv')
-        link_OH = osp.join(self.root, 'links/0322/link_OH_data.csv')
-        link_WI = osp.join(self.root, 'links/0322/link_WI_data.csv')
-        # processed_root = osp.join(self.root, 'processed', self.train_feature)
-        data_store_list = []
-        edge_index_list, edge_attr_list, node_data_list, target_list = [], [], [], []
+        if self.preprocessed:
+            return
+        else:
+            capacity_stats, amenity_stats, owner_list, mile_marker_list = preprocess(self.dataset_root)
+            link_root = osp.join(self.root, 'links', '0322')
+            data_dir = osp.join(self.root, 'data')
 
-        idx = 0
-        for i, node_path in enumerate(self.raw_file_names):
-            node_path = osp.join(node_root, node_path)
-            if osp.exists(node_path):
-                # Read data from 'raw_path'.
-                with open(node_path, 'r') as f:
-                    data = f.read().split('\n')[:-2]
-                    data = [[x for x in line.split(',')] for line in data]
+            link_path = osp.join(link_root, 'link_data.csv')
+            if self.decomp_type == 'regional':
+                link_IA = osp.join(link_root, 'link_IA_data.csv')
+                link_KS = osp.join(link_root, 'link_KS_data.csv')
+                link_KY = osp.join(link_root, 'link_KY_data.csv')
+                link_OH = osp.join(link_root, 'link_OH_data.csv')
+                link_WI = osp.join(link_root, 'link_WI_data.csv')
+            if self.decomp_type == 'random':
+                link_IA = osp.join(self.root, 'links/0322/link1_data.csv')
+                link_KS = osp.join(self.root, 'links/0322/link2_data.csv')
+                link_KY = osp.join(self.root, 'links/0322/link3_data.csv')
+                link_OH = osp.join(self.root, 'links/0322/link4_data.csv')
+                link_WI = osp.join(self.root, 'links/0322/link5_data.csv')
 
-                    stamps = [datetime.strptime(line[2], '%Y-%m-%dT%H:%M:%SZ') for line in data]
+            node_data_list = []
+            sc = MinMaxScaler(feature_range=(0,1))
 
-                    node_data, mapping = self.load_node_data(node_path, index_col='STATE_IDX', encoders={
-                        'WEEKID': IdentityEncoder(dtype=torch.long), 'DAYID': IdentityEncoder(dtype=torch.long), 'HOURID': IdentityEncoder(dtype=torch.long),
-                        'TRAVEL_TIME': IdentityEncoder(dtype=torch.float), 'OWNER': IdentityEncoder(dtype=torch.long),
-                        'AMENITY': IdentityEncoder(dtype=torch.long), 'CAPACITY': IdentityEncoder(dtype=torch.long), self.train_feature.upper(): IdentityEncoder(dtype=torch.float)})
+            # Make mapping for edge data
+            dfLOC = pd.read_csv(osp.join(data_dir, 'tpims_location.csv'))
+            # Replacement
+            # NaN -> 0
+            dfLOC = dfLOC[~dfLOC['SITE_ID'].str.startswith(('IL', 'MI', 'MN', 'IN'), na=False)]
+            dfLOC = dfLOC.replace({np.nan: 0})
 
-                edge_index, edge_attr = self.load_edge_data(link_path, src_index_col='SRC_IDX', src_mapping=mapping, dst_index_col='DST_IDX',
-                                                            dst_mapping=mapping, encoders={'DIST': IdentityEncoder(dtype=torch.float)})
-                edge_IA_index, edge_IA_attr = self.load_edge_data(link_IA, src_index_col='SRC_IDX', src_mapping=mapping, dst_index_col='DST_IDX',
-                                                            dst_mapping=mapping, encoders={'DIST': IdentityEncoder(dtype=torch.float)})
-                edge_KS_index, edge_KS_attr = self.load_edge_data(link_KS, src_index_col='SRC_IDX', src_mapping=mapping, dst_index_col='DST_IDX',
-                                                            dst_mapping=mapping, encoders={'DIST': IdentityEncoder(dtype=torch.float)})
-                edge_KY_index, edge_KY_attr = self.load_edge_data(link_KY, src_index_col='SRC_IDX', src_mapping=mapping, dst_index_col='DST_IDX',
-                                                            dst_mapping=mapping, encoders={'DIST': IdentityEncoder(dtype=torch.float)})
-                edge_OH_index, edge_OH_attr = self.load_edge_data(link_OH, src_index_col='SRC_IDX', src_mapping=mapping, dst_index_col='DST_IDX',
-                                                            dst_mapping=mapping, encoders={'DIST': IdentityEncoder(dtype=torch.float)})
-                edge_WI_index, edge_WI_attr = self.load_edge_data(link_WI, src_index_col='SRC_IDX', src_mapping=mapping, dst_index_col='DST_IDX',
-                                                            dst_mapping=mapping, encoders={'DIST': IdentityEncoder(dtype=torch.float)})
-                edge_attr = edge_attr.squeeze().clone().detach()
-                edge_IA_attr = edge_IA_attr.squeeze().clone().detach()
-                edge_KS_attr = edge_KS_attr.squeeze().clone().detach()
-                edge_KY_attr = edge_KY_attr.squeeze().clone().detach()
-                edge_OH_attr = edge_OH_attr.squeeze().clone().detach()
-                edge_WI_attr = edge_WI_attr.squeeze().clone().detach()
+            dfNODE = pd.read_csv(osp.join(data_dir, 'tpims_data_{}.csv'.format(self.data_size)))
+            mapping = {index-1: i for i, index in enumerate(range(1, len(dfLOC)))} # site_idx to idx
 
-            # Normalize
-            node_data = torch.from_numpy(self.sc.fit_transform(node_data))
-
-            # Get max and min available for every timestep
-            max_data = [node_data[i][-1].max() for i in range(node_data.size(0))]
-            min_data = [node_data[i][-1].min() for i in range(node_data.size(0))]
-            self.max_list.append(max_data)
-            self.min_list.append(min_data)
-
-            offset = timedelta(days=3.1)
-            graph_idx, factor = [], 1
-            # for each 10 minute
-            for t in stamps:
-                factor = factor if t < stamps[0] + factor * offset else factor + 1
-                graph_idx.append(factor - 1)
-            graph_idx = torch.tensor(graph_idx, dtype=torch.long)
-
-            data_list = []
-            for i in range(graph_idx.max().item() + 1):
-                data = Data(x=node_data[:,:-1].type(torch.FloatTensor), edge_index=edge_index.type(torch.LongTensor), edge_attr=edge_attr.type(torch.FloatTensor), 
-                            edge_IA_index=edge_IA_index.type(torch.LongTensor), edge_IA_attr=edge_IA_attr.type(torch.FloatTensor),
-                            edge_KS_index=edge_KS_index.type(torch.LongTensor), edge_KS_attr=edge_IA_attr.type(torch.FloatTensor),
-                            edge_KY_index=edge_KY_index.type(torch.LongTensor), edge_KY_attr=edge_IA_attr.type(torch.FloatTensor),
-                            edge_OH_index=edge_OH_index.type(torch.LongTensor), edge_OH_attr=edge_IA_attr.type(torch.FloatTensor),
-                            edge_WI_index=edge_WI_index.type(torch.LongTensor), edge_WI_attr=edge_IA_attr.type(torch.FloatTensor),
-                            requires_grad_=True)
-                data.num_node_features = 8 # capacity
-                data.num_nodes = len(mapping)
-                data.y = node_data[:,-1].type(torch.FloatTensor)# target == availability (occRate)
-                data_list.append(data)
-
-
-            if self.pre_filter is not None:
-                data = self.pre_filter(data)
+            # One edge data for all states
+            edge_index, edge_attr = self.load_edge_data(link_path, mapping=mapping, src_index_col='SRC_IDX', dst_index_col='DST_IDX',
+                                                        encoders={'DIST': IdentityEncoder(dtype=torch.float)})
+            edge_IA_index, edge_IA_attr = self.load_edge_data(link_IA, mapping=mapping, src_index_col='SRC_IDX', dst_index_col='DST_IDX',
+                                                        encoders={'DIST': IdentityEncoder(dtype=torch.float)})
+            edge_KS_index, edge_KS_attr = self.load_edge_data(link_KS, mapping=mapping, src_index_col='SRC_IDX', dst_index_col='DST_IDX',
+                                                        encoders={'DIST': IdentityEncoder(dtype=torch.float)})
+            edge_KY_index, edge_KY_attr = self.load_edge_data(link_KY, mapping=mapping, src_index_col='SRC_IDX', dst_index_col='DST_IDX',
+                                                        encoders={'DIST': IdentityEncoder(dtype=torch.float)})
+            edge_OH_index, edge_OH_attr = self.load_edge_data(link_OH, mapping=mapping, src_index_col='SRC_IDX', dst_index_col='DST_IDX',
+                                                        encoders={'DIST': IdentityEncoder(dtype=torch.float)})
+            edge_WI_index, edge_WI_attr = self.load_edge_data(link_WI, mapping=mapping, src_index_col='SRC_IDX', dst_index_col='DST_IDX',
+                                                        encoders={'DIST': IdentityEncoder(dtype=torch.float)})
+            edge_attr = edge_attr.squeeze().clone().detach()
+            edge_IA_attr = edge_IA_attr.squeeze().clone().detach()
+            edge_KS_attr = edge_KS_attr.squeeze().clone().detach()
+            edge_KY_attr = edge_KY_attr.squeeze().clone().detach()
+            edge_OH_attr = edge_OH_attr.squeeze().clone().detach()
+            edge_WI_attr = edge_WI_attr.squeeze().clone().detach()
             
-            if self.pre_transform is not None:
-                data = self.pre_transform(data)
+            t_prev = datetime.strptime('2022-03-01 00:00:00', '%Y-%m-%d %H:%M:%S')
+            
+            site_id, site_idx = unique(dfLOC['SITE_ID'])
+            # available = [0 for i in range(len(dfLOC))]
+            site_id_dict = {site: idx for idx, site in enumerate(site_id)}
+            available_dict = {site: 0 for site in site_id}
+            available = [0 for i in range(len(dfLOC))]
 
 
-            node_data_list.append(node_data)
+            for i in tqdm(range(6*24*self.time_range)):
+                idx = 0
 
+                t = (t_prev + timedelta(minutes=10)).strftime('%Y-%m-%d %H:%M:%S')
+                t_prev = t_prev.strftime('%Y-%m-%d %H:%M:%S')
+                mask = dfNODE['time_stamp'].between(str(t_prev), str(t))
+                filtered_df = dfNODE[mask]
+                siteId = filtered_df['site_id'].values
+                tmp_available = filtered_df['available'].values
 
-        torch.save((edge_index, edge_attr, edge_IA_index, edge_IA_attr, edge_KS_index, edge_KS_attr, edge_KY_index,
-                    edge_KY_attr, edge_OH_index, edge_OH_attr, edge_WI_index, edge_WI_attr, node_data_list), osp.join(self.processed_root, 'data.pt'))
+                week = int(int(t.split(' ')[0].split('-')[2]) / 7)
+                day = datetime.strptime(t, '%Y-%m-%d %H:%M:%S').weekday() # Mon - Sun
+                hour = t.split(' ')[1].split(':')[0]
+                adj_hour = int(hour)
 
+                ### Creating/preparing csv files first
+                site_to_available = dict(zip(siteId, tmp_available))
+
+                # Initialize dataframe
+                adj_hour = 0
+                temp_s_idx = len(site_id)
+                _node_data_list = []
+                ## IMPORTANT: All node data must be in the location data.
+                for j, site in enumerate(site_id):
+                    # Filling up the unknown values
+                    if 'IN' not in site[:2] and 'MI' not in site[:2] and 'MN' not in site[:3] and 'IL' not in site[:2]:
+                        idx += 1
+                        if site in siteId:
+                            s_idx = site_id_dict[site]
+                            available_value = site_to_available[site]
+
+                            if capacity_stats[j] == 0:
+                                capacity_stats[j] = np.finfo(np.float32).eps
+                            else:
+                                node_dict = {'SITE_IDX': [s_idx], 'SITE_ID': [site], 'TIMESTAMP': [t], 'WEEKID': [int(week)], 'DAYID': [int(day)], 'HOURID': [int(hour)], 'MILE_MARKER': [mile_marker_list[j]], 'OWNER': [owner_list[j]], 'AMENITY': [amenity_stats[j]], 'CAPACITY': [capacity_stats[j]], 'AVAILABLE': [available_value], 'OCCRATE': [available_value/capacity_stats[j]]}
+                            available[s_idx] = available_value
+                        else:
+                            try:
+                                # Change available/occrate when the site is not found
+                                node_dict = {'SITE_IDX': [temp_s_idx], 'SITE_ID': [site], 'TIMESTAMP': [t], 'WEEKID': [int(week)], 'DAYID': [int(day)], 'HOURID': [adj_hour], 'MILE_MARKER': [mile_marker_list[j]], 'OWNER': [owner_list[j]], 'AMENITY': [amenity_stats[j]], 'CAPACITY': [capacity_stats[j]], 'AVAILABLE': [int(available[temp_s_idx])], 'OCCRATE': [available[temp_s_idx]/capacity_stats[j]]}
+                            except IndexError:
+                                node_dict = {'SITE_IDX': [temp_s_idx], 'SITE_ID': [site], 'TIMESTAMP': [t], 'WEEKID': [int(week)], 'DAYID': [int(day)], 'HOURID': [adj_hour], 'MILE_MARKER': [mile_marker_list[j]], 'OWNER': [owner_list[j]], 'AMENITY': [amenity_stats[j]], 'CAPACITY': [capacity_stats[j]], 'AVAILABLE': [0], 'OCCRATE': [0.0]}
+                            temp_s_idx += 1
+                                
+                        encoders = {'WEEKID': IdentityEncoder(dtype=torch.long), 'DAYID': IdentityEncoder(dtype=torch.long), 'HOURID': IdentityEncoder(dtype=torch.long),
+                                'MILE_MARKER': IdentityEncoder(dtype=torch.float), 'OWNER': IdentityEncoder(dtype=torch.long),
+                                'AMENITY': IdentityEncoder(dtype=torch.long), 'CAPACITY': IdentityEncoder(dtype=torch.long), self.train_feature.upper(): IdentityEncoder(dtype=torch.float)}
+
+                        if encoders is not None:
+                            xs = [encoder(node_dict[col]) for col, encoder in encoders.items()]
+                            x = torch.cat(xs, dim=-1)
+                            x = torch.nan_to_num(x)
+
+                        _node_data_list.append(x)
+
+                # Upload to csv file
+                node_data = torch.cat(_node_data_list, dim=0)
+                node_data = torch.from_numpy(sc.fit_transform(node_data))
+                node_data_list.append(node_data)
+
+                # Update time
+                t_prev = datetime.strptime(t, '%Y-%m-%d %H:%M:%S')
+
+            torch.save((edge_index, edge_attr, edge_IA_index, edge_IA_attr, edge_KS_index, edge_KS_attr, edge_KY_index,
+                        edge_KY_attr, edge_OH_index, edge_OH_attr, edge_WI_index, edge_WI_attr, node_data_list), osp.join(self.processed_root, 'tpims_data_{}.pkl'.format(self.data_size)))
 
     def len(self):
         return len(self.processed_file_names)
@@ -386,8 +443,8 @@ class TruckParkingDataset2(Dataset):
         features, target = [], []
         features_IA, target_IA, features_KS, target_KS, features_KY, target_KY, features_OH, target_OH, features_WI, target_WI = [], [], [], [], [], [], [], [], [], []
         edge_index, edge_attr, edge_IA_index, edge_IA_attr, edge_KS_index, edge_KS_attr, edge_KY_index, \
-        edge_KY_attr, edge_OH_index, edge_OH_attr, edge_WI_index, edge_WI_attr, node_data = torch.load(osp.join(self.processed_root, 'data.pt'))
-        node_data = torch.stack(node_data, dim=1).permute(0,2,1)
+            edge_KY_attr, edge_OH_index, edge_OH_attr, edge_WI_index, edge_WI_attr, node_data = torch.load(osp.join(self.processed_root, 'tpims_data_{}.pkl'.format(self.data_size)))
+        node_data = torch.stack(node_data, dim=1).permute(0, 2, 1)
         node_data = torch.as_tensor(node_data)
         print(node_data.shape)
 
@@ -408,196 +465,7 @@ class TruckParkingDataset2(Dataset):
             target_OH.append((node_data[76:94,-1,i+num_timesteps_in:j]).numpy())
             features_WI.append((node_data[94:105,:,i:i+num_timesteps_in]).numpy())
             target_WI.append((node_data[94:105,-1,i+num_timesteps_in:j]).numpy())
-        mean = sum(target) / len(target)
-        variance = sum([((x - mean) ** 2) for x in target]) / len(target)
-        std = variance ** 0.5
-        data = StaticGraphTemporalSignal(edge_index, edge_attr, features, target)
-        return data, edge_IA_index, edge_KS_index, edge_KY_index, edge_OH_index, edge_WI_index, \
-                edge_IA_attr, edge_KS_attr, edge_KY_attr, edge_OH_attr, edge_WI_attr, self.sc, self.max_list, self.min_list
 
-
-class TruckParkingDataset3(Dataset):
-    '''Randomized Truck Parking Dataset'''
-
-    def __init__(self, root: str, 
-                 transform: Optional[Callable]=None,
-                 pre_transform: Optional[Callable]=None,
-                 pre_filter: Optional[Callable]=None,
-                 train_feature: str='occrate',
-                 visualize: bool=False):
-        self.train_feature = train_feature
-        self.root = root
-        self.processed_root = osp.join(self.root, 'processed', self.train_feature, 'random', '0322')
-        self.visualize_adj = visualize
-
-        self.sc = MinMaxScaler(feature_range=(0,1))
-        self.max_list = []
-        self.min_list = []
-        super().__init__(root, transform, pre_transform, pre_filter)
-
-
-    @property
-    def processed_file_names(self):
-        return osp.join(self.processed_root, 'data.pt')
-
-    @property
-    def num_nodes(self): 
-        return self.data.edge_index.max().item() + 1
-
-    def load_node_data(self, path, index_col, encoders=None):
-        data, mapping = load_node_csv(path, index_col, names=['SITE_IDX', 'SITE_ID', 'TIMESTAMP', 'WEEKID', 'DAYID', 'HOURID', 'TRAVEL_TIME', 'TRAVEL_MILE', 'OWNER', 'AMENITY', 'CAPACITY', 'AVAILABLE', 'OCCRATE'], encoders=encoders)
-        return data, mapping
-
-    def load_edge_data(self, path, src_index_col, src_mapping, dst_index_col, dst_mapping, encoders=None):
-        edge_idx, edge_attr = load_edge_csv(path, src_index_col, src_mapping, dst_index_col, dst_mapping, names=['SRC_IDX', 'SRC', 'DST_IDX', 'DST', 'DIST'], encoders=encoders, visualize_adj=self.visualize_adj)
-        return edge_idx, edge_attr
-
-    @property
-    def raw_file_names(self):
-        t_prev = datetime.strptime('2022-03-01T00:00:00Z', '%Y-%m-%dT%H:%M:%SZ')
-        # t_prev = datetime.strptime('2022-03-15T00:00:00Z', '%Y-%m-%dT%H:%M:%SZ')
-        
-        file_list = []
-        _minutes = 10 # time interval every 10 minues
-        assert _minutes != 0
-        min_per_hour = int(60 / _minutes)
-
-        for i in range(min_per_hour*24*14):
-            t = (t_prev + timedelta(minutes=_minutes)).strftime('%Y-%m-%dT%H:%M:%SZ')
-            t_prev = t_prev.strftime('%Y-%m-%dT%H:%M:%SZ')
-
-            t_file = t_prev.replace(':', '-') # change notation for file name
-            file_name = 'node_data_' + t_file + '.csv'
-
-            # Update time
-            t_prev = datetime.strptime(t, '%Y-%m-%dT%H:%M:%SZ')
-
-            file_list.append(file_name)
-        
-        return file_list
-
-    def process(self):
-    
-        node_root = osp.join(self.root, 'nodes/0322')
-        link_path = osp.join(self.root, 'links/0322/link_data.csv')
-        link_IA = osp.join(self.root, 'links/0322/link1_data.csv')
-        link_KS = osp.join(self.root, 'links/0322/link2_data.csv')
-        link_KY = osp.join(self.root, 'links/0322/link3_data.csv')
-        link_OH = osp.join(self.root, 'links/0322/link4_data.csv')
-        link_WI = osp.join(self.root, 'links/0322/link5_data.csv')
-        # processed_root = osp.join(self.root, 'processed', self.train_feature)
-        data_store_list = []
-        edge_index_list, edge_attr_list, node_data_list, target_list = [], [], [], []
-
-        idx = 0
-        for i, node_path in enumerate(self.raw_file_names):
-            node_path = osp.join(node_root, node_path)
-            if osp.exists(node_path):
-                # Read data from 'raw_path'.
-                with open(node_path, 'r') as f:
-                    data = f.read().split('\n')[:-2]
-                    data = [[x for x in line.split(',')] for line in data]
-
-                    stamps = [datetime.strptime(line[2], '%Y-%m-%dT%H:%M:%SZ') for line in data]
-
-                    node_data, mapping = self.load_node_data(node_path, index_col='STATE_IDX', encoders={
-                        'WEEKID': IdentityEncoder(dtype=torch.long), 'DAYID': IdentityEncoder(dtype=torch.long), 'HOURID': IdentityEncoder(dtype=torch.long),
-                        'TRAVEL_TIME': IdentityEncoder(dtype=torch.float), 'OWNER': IdentityEncoder(dtype=torch.long),
-                        'AMENITY': IdentityEncoder(dtype=torch.long), 'CAPACITY': IdentityEncoder(dtype=torch.long), self.train_feature.upper(): IdentityEncoder(dtype=torch.float)})
-
-                edge_index, edge_attr = self.load_edge_data(link_path, src_index_col='SRC_IDX', src_mapping=mapping, dst_index_col='DST_IDX',
-                                                            dst_mapping=mapping, encoders={'DIST': IdentityEncoder(dtype=torch.float)})
-                edge_IA_index, edge_IA_attr = self.load_edge_data(link_IA, src_index_col='SRC_IDX', src_mapping=mapping, dst_index_col='DST_IDX',
-                                                            dst_mapping=mapping, encoders={'DIST': IdentityEncoder(dtype=torch.float)})
-                edge_KS_index, edge_KS_attr = self.load_edge_data(link_KS, src_index_col='SRC_IDX', src_mapping=mapping, dst_index_col='DST_IDX',
-                                                            dst_mapping=mapping, encoders={'DIST': IdentityEncoder(dtype=torch.float)})
-                edge_KY_index, edge_KY_attr = self.load_edge_data(link_KY, src_index_col='SRC_IDX', src_mapping=mapping, dst_index_col='DST_IDX',
-                                                            dst_mapping=mapping, encoders={'DIST': IdentityEncoder(dtype=torch.float)})
-                edge_OH_index, edge_OH_attr = self.load_edge_data(link_OH, src_index_col='SRC_IDX', src_mapping=mapping, dst_index_col='DST_IDX',
-                                                            dst_mapping=mapping, encoders={'DIST': IdentityEncoder(dtype=torch.float)})
-                edge_WI_index, edge_WI_attr = self.load_edge_data(link_WI, src_index_col='SRC_IDX', src_mapping=mapping, dst_index_col='DST_IDX',
-                                                            dst_mapping=mapping, encoders={'DIST': IdentityEncoder(dtype=torch.float)})
-                edge_attr = edge_attr.squeeze().clone().detach()
-                edge_IA_attr = edge_IA_attr.squeeze().clone().detach()
-                edge_KS_attr = edge_KS_attr.squeeze().clone().detach()
-                edge_KY_attr = edge_KY_attr.squeeze().clone().detach()
-                edge_OH_attr = edge_OH_attr.squeeze().clone().detach()
-                edge_WI_attr = edge_WI_attr.squeeze().clone().detach()
-
-            # Normalize
-            node_data = torch.from_numpy(self.sc.fit_transform(node_data))
-
-            # Get max and min available for every timestep
-            max_data = [node_data[i][-1].max() for i in range(node_data.size(0))]
-            min_data = [node_data[i][-1].min() for i in range(node_data.size(0))]
-            self.max_list.append(max_data)
-            self.min_list.append(min_data)
-
-            offset = timedelta(days=3.1)
-            graph_idx, factor = [], 1
-            # for each 10 minute
-            for t in stamps:
-                factor = factor if t < stamps[0] + factor * offset else factor + 1
-                graph_idx.append(factor - 1)
-            graph_idx = torch.tensor(graph_idx, dtype=torch.long)
-
-            data_list = []
-            for i in range(graph_idx.max().item() + 1):
-                data = Data(x=node_data[:,:-1].type(torch.FloatTensor), edge_index=edge_index.type(torch.LongTensor), edge_attr=edge_attr.type(torch.FloatTensor), 
-                            edge_IA_index=edge_IA_index.type(torch.LongTensor), edge_IA_attr=edge_IA_attr.type(torch.FloatTensor),
-                            edge_KS_index=edge_KS_index.type(torch.LongTensor), edge_KS_attr=edge_IA_attr.type(torch.FloatTensor),
-                            edge_KY_index=edge_KY_index.type(torch.LongTensor), edge_KY_attr=edge_IA_attr.type(torch.FloatTensor),
-                            edge_OH_index=edge_OH_index.type(torch.LongTensor), edge_OH_attr=edge_IA_attr.type(torch.FloatTensor),
-                            edge_WI_index=edge_WI_index.type(torch.LongTensor), edge_WI_attr=edge_IA_attr.type(torch.FloatTensor),
-                            requires_grad_=True)
-                data.num_node_features = 8 # capacity
-                data.num_nodes = len(mapping)
-                data.y = node_data[:,-1].type(torch.FloatTensor)# target == availability (occRate)
-                data_list.append(data)
-
-            if self.pre_filter is not None:
-                data = self.pre_filter(data)
-            
-            if self.pre_transform is not None:
-                data = self.pre_transform(data)
-
-            node_data_list.append(node_data)
-
-        torch.save((edge_index, edge_attr, edge_IA_index, edge_IA_attr, edge_KS_index, edge_KS_attr, edge_KY_index,
-                    edge_KY_attr, edge_OH_index, edge_OH_attr, edge_WI_index, edge_WI_attr, node_data_list), osp.join(self.processed_root, 'data.pt'))
-
-    def len(self):
-        return len(self.processed_file_names)
-
-    def get(self, idx=None, num_timesteps_in=24, num_timesteps_out=12):
-        features, target = [], []
-        features_IA, target_IA, features_KS, target_KS, features_KY, target_KY, features_OH, target_OH, features_WI, target_WI = [], [], [], [], [], [], [], [], [], []
-        edge_index, edge_attr, edge_IA_index, edge_IA_attr, edge_KS_index, edge_KS_attr, edge_KY_index, \
-        edge_KY_attr, edge_OH_index, edge_OH_attr, edge_WI_index, edge_WI_attr, node_data = torch.load(osp.join(self.processed_root, 'data.pt'))
-        node_data = torch.stack(node_data, dim=1).permute(0,2,1)
-        node_data = torch.as_tensor(node_data)
-        print(node_data.shape)
-
-        indices = [
-            (i, i + (num_timesteps_in + num_timesteps_out))
-            for i in range(node_data.shape[2] - (num_timesteps_in + num_timesteps_out) + 1)
-        ]
-        for i, j in indices:
-            features.append((node_data[:,:,i:i+num_timesteps_in]).numpy())
-            target.append((node_data[:,-1,i+num_timesteps_in:j]).numpy())
-            features_IA.append((node_data[:45,:,i:i+num_timesteps_in]).numpy())
-            target_IA.append((node_data[:45,-1,i+num_timesteps_in:j]).numpy())
-            features_KS.append((node_data[45:63,:,i:i+num_timesteps_in]).numpy())
-            target_KS.append((node_data[45:63,-1,i+num_timesteps_in:j]).numpy())
-            features_KY.append((node_data[63:76,:,i:i+num_timesteps_in]).numpy())
-            target_KY.append((node_data[63:76,-1,i+num_timesteps_in:j]).numpy())
-            features_OH.append((node_data[76:94,:,i:i+num_timesteps_in]).numpy())
-            target_OH.append((node_data[76:94,-1,i+num_timesteps_in:j]).numpy())
-            features_WI.append((node_data[94:105,:,i:i+num_timesteps_in]).numpy())
-            target_WI.append((node_data[94:105,-1,i+num_timesteps_in:j]).numpy())
-        mean = sum(target) / len(target)
-        variance = sum([((x - mean) ** 2) for x in target]) / len(target)
-        std = variance ** 0.5
         data = StaticGraphTemporalSignal(edge_index, edge_attr, features, target)
         return data, edge_IA_index, edge_KS_index, edge_KY_index, edge_OH_index, edge_WI_index, \
                 edge_IA_attr, edge_KS_attr, edge_KY_attr, edge_OH_attr, edge_WI_attr, self.sc, self.max_list, self.min_list

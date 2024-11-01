@@ -30,13 +30,15 @@ parser.add_argument("--bs", "--batch_size", default=32, type=int, help="Batch si
 parser.add_argument("--tr", "--train_ratio", default=0.8, type=float, help="Train ratio")
 parser.add_argument("--tf", "--train_feature", default="available", type=str, help="Train feature (occrate / avaialble)")
 parser.add_argument("--edge_cut", default=None, type=str, help="The type of edge cut (random/neural/None)")
-parser.add_argument("--dataset_path", default="../data_analysis/dataset", type=str, help="Dataset path")
+parser.add_argument("--dataset_path", default="./dataset", type=str, help="Dataset path")
 parser.add_argument("--checkpoint_path", default="../checkpoints/", type=str, help="Checkpoints path")
-parser.add_argument("--dataset_num", default=2, type=int, help="Dataset number (Truckparking dataset '1' / '2')")
+parser.add_argument("--dataloading_type", default=2, type=int, help="Dataset number (Truckparking dataset '1' / '2')")
+parser.add_argument("--decomp_type", default=None, type=str, help="Regional or Random decomposition type")
 parser.add_argument("--num_timesteps_in", default=8, type=int, help="Number of timesteps for input, and large number causes a memory allocation issue")
 parser.add_argument("--num_timesteps_out", default=4, type=int, help="Number of timesteps for output, which is normally half of input")
 parser.add_argument("--model", default="TemporalGCN", type=str, help="Model name you want to use (TemporalGNN - TGCN SOTA, TemporalGConvLSTM - GConvLSTM, RecurrentGCN - might be stack of simple LSTMs)")
-parser.add_argument("--pretrained", action="store_true")
+parser.add_argument("--is_preprocessed", action="store_true", help="If the dataset is preprocessed")
+parser.add_argument("--is_pretrained", action="store_true")
 parser.add_argument("--pretrained_model", default="", type=str, help="Pretrained model name")
 parser.add_argument("--pretrained_model_epoch", default="0", type=str, help="Pretrained model epochs")
 parser.add_argument("--logs", action="store_true")
@@ -76,32 +78,20 @@ os.makedirs(CHECKPOINT_PATH, exist_ok=True)
 
 # Datasets
 print("Load Data...")
-if args.dataset_num == 1:
+if args.dataloading_type in [1, 3]:
     # Use parking dataset 1 with StaticGraphTemporalSignal, data stored at './data.pt'
-    dataset = TruckParkingDataset1(root=DATASET_PATH, pre_transform=pre_transform, train_feature=TRAIN_FEATURE, edge_cut=args.edge_cut)
-    dataset, edge_index, edge_attr, target_sc, max_list, min_list = dataset.get(num_timesteps_in=args.num_timesteps_in, num_timesteps_out=args.num_timesteps_out)
-elif args.dataset_num == 2:
-    # Use parking dataset 2 with StaticGraphTemporalSignal, data stored at './data.pt'. Usually used for RegT-GCN
-    dataset = TruckParkingDataset2(root=DATASET_PATH, pre_transform=pre_transform, train_feature=TRAIN_FEATURE)
-    dataset, edge_IA_index, edge_KS_index, edge_KY_index, edge_OH_index, edge_WI_index, \
-        edge_IA_attr, edge_KS_attr, edge_KY_attr, edge_OH_attr, edge_WI_attr, target_sc, max_list, min_list = dataset.get(num_timesteps_in=args.num_timesteps_in, num_timesteps_out=args.num_timesteps_out)
-    edge_IA_index = edge_IA_index.to(device)
-    edge_KS_index = edge_KS_index.to(device)
-    edge_KY_index = edge_KY_index.to(device)
-    edge_OH_index = edge_OH_index.to(device)
-    edge_WI_index = edge_WI_index.to(device)
-    edge_IA_attr = edge_IA_attr.to(device)
-    edge_KS_attr = edge_KS_attr.to(device)
-    edge_KY_attr = edge_KY_attr.to(device)
-    edge_OH_attr = edge_OH_attr.to(device)
-    edge_WI_attr = edge_WI_attr.to(device)
-elif args.dataset_num == 3:
+    dataset = TruckParkingDataset1(root=DATASET_PATH, pre_transform=pre_transform, train_feature=TRAIN_FEATURE, edge_cut=args.edge_cut, preprocessed=args.is_preprocessed)
+    if args.dataloading_type == 1:
+        dataset, edge_index, edge_attr, target_sc, max_list, min_list = dataset.get(num_timesteps_in=args.num_timesteps_in, num_timesteps_out=args.num_timesteps_out)
+    elif args.dataloading_type == 3:
+        dataset, edge_index, edge_attr, target_sc, max_list, min_list = dataset.custom_get(num_timesteps_in=args.num_timesteps_in, num_timesteps_out=args.num_timesteps_out)
+elif args.dataloading_type == 2:
     '''
     For a regional dataset, the number of each state sites are below
     IA: 45, KS: 18, KY: 13, OH: 18, WI: 11
     '''
-    # Use parking dataset 3 with StaticGraphTemporalSignal, data stored at './data.pt'. Usually used for RanT-GCN
-    dataset = TruckParkingDataset3(root=DATASET_PATH, pre_transform=pre_transform, train_feature=TRAIN_FEATURE)
+    # Use parking dataset 2 with StaticGraphTemporalSignal, data stored at './data.pt'. Usually used for RegT-GCN
+    dataset = TruckParkingDataset2(root=DATASET_PATH, pre_transform=pre_transform, train_feature=TRAIN_FEATURE, preprocessed=args.is_preprocessed, decomp_type=args.decomp_type)
     dataset, edge_IA_index, edge_KS_index, edge_KY_index, edge_OH_index, edge_WI_index, \
         edge_IA_attr, edge_KS_attr, edge_KY_attr, edge_OH_attr, edge_WI_attr, target_sc, max_list, min_list = dataset.get(num_timesteps_in=args.num_timesteps_in, num_timesteps_out=args.num_timesteps_out)
     edge_IA_index = edge_IA_index.to(device)
@@ -114,7 +104,6 @@ elif args.dataset_num == 3:
     edge_KY_attr = edge_KY_attr.to(device)
     edge_OH_attr = edge_OH_attr.to(device)
     edge_WI_attr = edge_WI_attr.to(device)
-
 
 # print(len(set(dataset)))
 # print(next(iter(dataset)))
@@ -128,11 +117,9 @@ if args.model == 'RegionalTemporalGCN' or args.model == 'RandomTemporalGCN':
 elif args.model == 'SpatialGCN':
     model = SpatialGCN(node_features=8, periods=args.num_timesteps_in, output_dim=args.num_timesteps_out).to(device)
 elif args.model == 'TemporalGCN':
-    model = TemporalGNN(node_features=8, periods=args.num_timesteps_in, output_dim=args.num_timesteps_out).to(device) 
+    model = TemporalGCN(node_features=8, periods=args.num_timesteps_in, output_dim=args.num_timesteps_out).to(device) 
 elif args.model == 'TemporalGConvLSTM':
     model = TemporalGConvLSTM(node_features=8, periods=args.num_timesteps_in, output_dim=args.num_timesteps_out).to(device)
-elif args.model == 'TemporalRecurrentGCN':
-    model = RecurrentGCN(node_features=8, filters=args.num_timesteps_out).to(device)
 elif args.model == 'StackedGRU':
     model = StackedGRU(in_channels=args.num_timesteps_in, node_features=8, periods=args.num_timesteps_in, output_dim=args.num_timesteps_out).to(device)
 elif args.model == 'ConvStackedTemporalGCN':
@@ -141,9 +128,16 @@ elif args.model == 'GraphSAGETemporalGCN':
     model = GraphSAGETemporalGCN(node_features=8, num_nodes=num_nodes, periods=args.num_timesteps_in, output_dim=args.num_timesteps_out).to(device) 
 elif args.model == 'GAT':
     model = GATTemporal(node_features=8, num_nodes=num_nodes, periods=args.num_timesteps_in, output_dim=args.num_timesteps_out).to(device) 
+elif args.model == 'STAEformer': # Not working well
+    model = STAEformer(num_nodes=num_nodes, in_steps=args.num_timesteps_in, out_steps=args.num_timesteps_out, tod_embedding_dim=0).to(device)
+elif args.model == 'STID':
+    model = STID(num_nodes=num_nodes, input_len=args.num_timesteps_in, output_len=args.num_timesteps_out, if_time_in_day=False, if_day_in_week=False).to(device)
+elif args.model == 'STNorm':
+    model = STNorm(num_nodes=num_nodes, in_dim=8, out_dim=args.num_timesteps_out).to(device)
 
+os.makedirs(osp.join('pretrained', TRAIN_FEATURE, args.model), exist_ok=True)
 
-if args.pretrained:
+if args.is_pretrained:
     model.load_state_dict(torch.load(osp.join('pretrained', args.tf, args.model, args.pretrained_model)))
 pretrained_idx = args.pretrained_model_epoch
 
@@ -171,6 +165,7 @@ def train():
 
     model.train()
     step = 0
+    total_loss = 0
 
     for i, batch in tqdm(enumerate(train_dataset)):
 
@@ -178,25 +173,29 @@ def train():
         
         if args.model == 'StackedGRU':
             out = model(batch.x, batch.edge_index) 
-            loss += torch.mean((out[:, -1, :] - batch.y)**2).cpu()
+            loss = torch.mean((out[:, -1, :] - batch.y)**2).cpu()
         elif args.model == 'RegionalTemporalGCN' or args.model == 'RandomTemporalGCN':
             out, _ = model(batch.x, batch.edge_index, edge_IA_index, edge_KS_index, edge_KY_index, edge_OH_index, edge_WI_index, \
                                     edge_IA_attr, edge_KS_attr, edge_KY_attr, edge_OH_attr, edge_WI_attr)
-            loss += torch.mean((out - batch.y) ** 2).cpu()
+            loss = torch.mean((out - batch.y) ** 2).cpu()
+        elif args.model == 'STAEformer' or args.model == 'STID' or args.model == 'STNorm':
+            # Reshape the input tensor to (batch_size, seq_len, num_nodes, num_features)
+            x = batch.x.permute(2, 0, 1).unsqueeze(0)
+            out = model(x)
 
+            loss = torch.mean((out - batch.y)**2).cpu()
         else:
             out, _ = model(x=batch.x, edge_index=batch.edge_index, edge_attr=batch.edge_attr)
-            loss += torch.mean((out - batch.y)**2).cpu()
+            loss = torch.mean((out - batch.y)**2).cpu()
+        loss.backward()
+        total_loss += loss.detach().cpu()
         step += 1
         
-    loss = loss / (step+1)
-    loss.backward()
     optimizer.step()
     optimizer.zero_grad()
 
     out_loss = loss.detach()
 
-    del loss, out
     return out_loss
 
 # Test phase
@@ -215,6 +214,12 @@ def test():
             out, _ = model(batch.x, batch.edge_index, edge_IA_index, edge_KS_index, edge_KY_index, edge_OH_index, edge_WI_index, \
                                     edge_IA_attr, edge_KS_attr, edge_KY_attr, edge_OH_attr, edge_WI_attr)
             mse.append(((out - batch.y)**2).cpu())
+        elif args.model == 'STAEformer' or args.model == 'STID' or args.model == 'STNorm':
+            x = batch.x.permute(2, 0, 1).unsqueeze(0)
+
+            out = model(x)
+            y = batch.y
+            mse.append(((out[0][0] - y)**2).cpu())
         else:
             out, h = model(batch.x, batch.edge_index, batch.edge_attr) 
             mse.append(((out - batch.y)**2).cpu())
