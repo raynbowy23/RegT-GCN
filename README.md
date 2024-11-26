@@ -139,14 +139,14 @@ If you find our work useful in your research, please consider to cite followings
 
 TPIMS Dataset explanation:
 ```
-@inbook{tamaru2023web,
-    title = {Web Portal Development and Site Usage Pattern Analysis for a Multi-State Truck Parking Information Management System (TPIMS)},
-    author = {Rei Tamaru  and Yang Cheng  and Steven Parker  and Ernie Perry  and Bin Ran  and Soyoung (Sue) Ahn },
-    booktitle = {International Conference on Transportation and Development 2023},
-    chapter = {},
-    pages = {489-500},
-    doi = {10.1061/9780784484876.043},
-    URL = {https://ascelibrary.org/doi/abs/10.1061/9780784484876.043},
+@inproceedings{rei2023,
+ author = {Tamaru, Rei and Cheng, Yang and Parker, Steven and Perry, Ernie and Ran, Bin and Ahn, Soyoung},
+ title = {Web Portal Development and Site Usage Pattern Analysis for a Multi-State Truck Parking Information Management System (TPIMS)},
+ booktitle = {International Conference on Transportation and Development 2023},
+ chapter = {},
+ year = {2023},
+ pages = {489-500},
+ doi = {10.1061/9780784484876.043},
 }
 
 ```
